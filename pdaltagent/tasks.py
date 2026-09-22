@@ -6,6 +6,7 @@ import requests
 import sqlite3
 from requests import HTTPError
 from pdaltagent.config import app
+from pdaltagent.pendo_track import track as pendo_track
 from celery.utils.log import get_task_logger
 from celery import chain
 
@@ -65,13 +66,33 @@ def setup_periodic_tasks(sender, **kwargs):
           retry_backoff_max=60*60*2,
           acks_late=True)
 def send_to_pd(routing_key, payload, base_url="https://events.pagerduty.com", destination_type="v2"):
-    return (routing_key, pd.send_event(routing_key, payload, base_url, destination_type))
+    result = pd.send_event(routing_key, payload, base_url, destination_type)
+
+    # Pendo Track: event successfully delivered to PagerDuty
+    masked_key = ("***" + routing_key[-4:]) if len(routing_key) >= 4 else "***"
+    dedup_key = payload.get("dedup_key", "")
+    pendo_track("event_delivered_to_pagerduty", {
+        "routing_key": masked_key,
+        "destination_type": destination_type,
+        "base_url": base_url,
+        "dedup_key": dedup_key[:8] + "***" if dedup_key else "",
+    })
+
+    return (routing_key, result)
 
 @app.task(autoretry_for=(HTTPError,),
           retry_kwargs={'max_retries': 10},
           retry_backoff=15)
 def send_webhook(url, payload):
-    return (url, requests.post(url, json=payload))
+    response = requests.post(url, json=payload)
+
+    # Pendo Track: webhook successfully relayed to destination
+    pendo_track("webhook_relayed", {
+        "destination_url": url,
+        "response_status_code": response.status_code,
+    })
+
+    return (url, response)
 
 @app.task()
 def poll_pd_log_entries():
@@ -113,6 +134,18 @@ def poll_pd_log_entries():
     conn.close()
     for incident_id, ile_chain in ile_chains.items():
         chain(ile_chain).delay()
+
+    # Pendo Track: log entries polled from PagerDuty API
+    pendo_track("log_entries_polled", {
+        "entries_fetched": len(iles),
+        "entries_processed": len(new_iles),
+        "duplicates_skipped": dups,
+        "since_timestamp": since,
+        "until_timestamp": until,
+        "polling_interval_seconds": POLLING_INTERVAL_SECONDS,
+        "is_overview": IS_OVERVIEW,
+    })
+
     return f"{len(iles)} fetched, {len(new_iles)} processed, {dups} duplicates (since {since})"
 
 @app.task()
@@ -125,6 +158,14 @@ def clean_activity_store():
     r = c.rowcount
     c.close()
     conn.close()
+
+    # Pendo Track: old log entry records purged from activity store
+    pendo_track("activity_store_cleaned", {
+        "rows_deleted": r,
+        "keep_activity_seconds": KEEP_ACTIVITY_SECONDS,
+        "cutoff_timestamp": d.isoformat(),
+    })
+
     return f"{r} rows deleted"
 
 def consume():
