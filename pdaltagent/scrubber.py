@@ -1,4 +1,5 @@
 import re
+from pdaltagent.pendo import pendo_track
 
 # adapted from https://github.com/madisonmay/CommonRegex
 
@@ -40,6 +41,17 @@ regexes = {
 
 def scrub(string_in):
     string = string_in
+    patterns_matched = []
+    total_replacements = 0
     for (name, regex) in regexes.items():
-        string = regex.sub(f"{{{{{name.upper()}}}}}", string)
+        string, count = regex.subn(f"{{{{{name.upper()}}}}}", string)
+        if count > 0:
+            patterns_matched.append(name)
+            total_replacements += count
+    if patterns_matched:
+        pendo_track("pii_scrub_applied", {
+            "patterns_matched": ",".join(patterns_matched),
+            "total_replacements": total_replacements,
+            "payload_size_bytes": len(string_in),
+        })
     return string

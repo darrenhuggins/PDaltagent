@@ -2,6 +2,7 @@
 import os
 from argparse import ArgumentParser
 import pdaltagent.pd as pd
+from pdaltagent.pendo import pendo_track
 import requests
 import urllib3
 
@@ -122,6 +123,18 @@ def main():
 
     r = requests.post(f"{BASE_URL}/v2/enqueue", json=body, verify=VERIFY_CERT)
     r.raise_for_status()
+    # Track successful CLI event submission
+    pendo_track("cli_event_submitted", {
+        "event_type": args.event_type,
+        "severity": args.severity,
+        "has_incident_key": bool(args.incident_key),
+        "has_custom_details": bool(args.fields),
+        "custom_details_count": len(args.fields) if args.fields else 0,
+        "has_client": bool(args.client),
+        "has_client_url": bool(args.client_url),
+        "base_url_is_default": BASE_URL == "https://events.pagerduty.com",
+        "cert_verify_enabled": VERIFY_CERT,
+    })
     if not args.quiet:
         print(r.text)
 
