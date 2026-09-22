@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 import pdaltagent.pd as pd
 import requests
 import urllib3
+from pdaltagent.pendo_tracking import pendo_track
 
 VERIFY_CERT = False if os.environ.get("PDSEND_SKIP_CERT_VERIFY") and os.environ.get("PDSEND_SKIP_CERT_VERIFY").lower != 'false' else True
 
@@ -122,6 +123,17 @@ def main():
 
     r = requests.post(f"{BASE_URL}/v2/enqueue", json=body, verify=VERIFY_CERT)
     r.raise_for_status()
+    pendo_track("pd_send_event_submitted", {
+        "event_type": args.event_type,
+        "severity": args.severity,
+        "has_incident_key": args.incident_key is not None,
+        "has_custom_details": bool(args.fields),
+        "custom_detail_count": len(args.fields) if args.fields else 0,
+        "has_client": args.client is not None,
+        "has_component": args.component is not None,
+        "has_group": args.group is not None,
+        "base_url": BASE_URL,
+    })
     if not args.quiet:
         print(r.text)
 

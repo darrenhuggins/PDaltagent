@@ -6,6 +6,7 @@ import requests
 import sqlite3
 from requests import HTTPError
 from pdaltagent.config import app
+from pdaltagent.pendo_tracking import pendo_track
 from celery.utils.log import get_task_logger
 from celery import chain
 
@@ -59,19 +60,72 @@ def setup_periodic_tasks(sender, **kwargs):
     sender.add_periodic_task(float(POLLING_INTERVAL_SECONDS), poll_pd_log_entries.s())
     sender.add_periodic_task(float(KEEP_ACTIVITY_SECONDS), clean_activity_store.s())
 
-@app.task(autoretry_for=(HTTPError,),
+
+class _SendToPDBase(app.Task):
+    """Custom Task base that tracks delivery failures to Pendo."""
+    abstract = True
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        destination_type = kwargs.get('destination_type', 'v2')
+        base_url = kwargs.get('base_url', 'https://events.pagerduty.com')
+        last_error_message = str(exc)[:100] if exc else ''
+        last_error_status_code = ''
+        if hasattr(exc, 'response') and exc.response is not None:
+            last_error_status_code = str(exc.response.status_code)
+        total_retries = 0
+        try:
+            total_retries = self.request.retries
+        except Exception:
+            pass
+        pendo_track("event_delivery_failed", {
+            "destination_type": destination_type,
+            "base_url": base_url,
+            "total_retries": total_retries,
+            "last_error_status_code": last_error_status_code,
+            "last_error_message": last_error_message,
+        })
+
+
+@app.task(base=_SendToPDBase, bind=True,
+          autoretry_for=(HTTPError,),
           retry_kwargs={'max_retries': 10},
           retry_backoff=15,
           retry_backoff_max=60*60*2,
           acks_late=True)
-def send_to_pd(routing_key, payload, base_url="https://events.pagerduty.com", destination_type="v2"):
-    return (routing_key, pd.send_event(routing_key, payload, base_url, destination_type))
+def send_to_pd(self, routing_key, payload, base_url="https://events.pagerduty.com", destination_type="v2"):
+    result = pd.send_event(routing_key, payload, base_url, destination_type)
+    pendo_track("event_delivered_to_pagerduty", {
+        "destination_type": destination_type,
+        "base_url": base_url,
+        "retry_count": self.request.retries,
+    })
+    return (routing_key, result)
 
-@app.task(autoretry_for=(HTTPError,),
+@app.task(bind=True, autoretry_for=(HTTPError,),
           retry_kwargs={'max_retries': 10},
           retry_backoff=15)
-def send_webhook(url, payload):
-    return (url, requests.post(url, json=payload))
+def send_webhook(self, url, payload):
+    response = requests.post(url, json=payload)
+    webhook_event_type = ""
+    incident_id = ""
+    log_entry_id = ""
+    try:
+        msg = payload.get("messages", [{}])[0]
+        webhook_event_type = msg.get("event", "")
+        incident_id = msg.get("incident", {}).get("id", "")
+        log_entries = msg.get("log_entries", [{}])
+        if log_entries:
+            log_entry_id = log_entries[0].get("id", "")
+    except (IndexError, TypeError, AttributeError):
+        pass
+    pendo_track("webhook_delivered", {
+        "destination_url": url[:200],
+        "webhook_event_type": webhook_event_type,
+        "incident_id": incident_id,
+        "log_entry_id": log_entry_id,
+        "retry_count": self.request.retries,
+    })
+    return (url, response)
 
 @app.task()
 def poll_pd_log_entries():
@@ -113,6 +167,16 @@ def poll_pd_log_entries():
     conn.close()
     for incident_id, ile_chain in ile_chains.items():
         chain(ile_chain).delay()
+    pendo_track("log_entries_poll_completed", {
+        "total_fetched": len(iles),
+        "new_processed": len(new_iles),
+        "duplicates": dups,
+        "incidents_with_new": len(ile_chains),
+        "polling_interval_seconds": POLLING_INTERVAL_SECONDS,
+        "is_overview": IS_OVERVIEW,
+        "since": since,
+        "until": until,
+    })
     return f"{len(iles)} fetched, {len(new_iles)} processed, {dups} duplicates (since {since})"
 
 @app.task()
@@ -125,6 +189,11 @@ def clean_activity_store():
     r = c.rowcount
     c.close()
     conn.close()
+    pendo_track("activity_store_cleaned", {
+        "rows_deleted": r,
+        "retention_seconds": KEEP_ACTIVITY_SECONDS,
+        "retention_days": KEEP_ACTIVITY_SECONDS // 86400,
+    })
     return f"{r} rows deleted"
 
 def consume():
