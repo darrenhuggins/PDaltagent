@@ -1,4 +1,5 @@
 import re
+import pdaltagent.pendo_track as pendo_track
 
 # adapted from https://github.com/madisonmay/CommonRegex
 
@@ -40,6 +41,24 @@ regexes = {
 
 def scrub(string_in):
     string = string_in
+    pii_types_detected = []
+    total_replacements = 0
     for (name, regex) in regexes.items():
-        string = regex.sub(f"{{{{{name.upper()}}}}}", string)
+        string, count = regex.subn(f"{{{{{name.upper()}}}}}", string)
+        if count > 0:
+            pii_types_detected.append(name)
+            total_replacements += count
+
+    # Pendo Track Event: PII scrubbing applied to payload
+    if total_replacements > 0:
+        try:
+            pendo_track.track("pii_scrub_applied", properties={
+                "pii_types_detected": ",".join(pii_types_detected),
+                "total_replacements": total_replacements,
+                "payload_size_before": len(string_in),
+                "payload_size_after": len(string),
+            })
+        except Exception:
+            pass
+
     return string

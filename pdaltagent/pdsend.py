@@ -2,6 +2,7 @@
 import os
 from argparse import ArgumentParser
 import pdaltagent.pd as pd
+import pdaltagent.pendo_track as pendo_track
 import requests
 import urllib3
 
@@ -122,6 +123,22 @@ def main():
 
     r = requests.post(f"{BASE_URL}/v2/enqueue", json=body, verify=VERIFY_CERT)
     r.raise_for_status()
+
+    # Pendo Track Event: pd-send CLI event submitted successfully
+    try:
+        custom_details = parse_fields(args.fields)
+        pendo_track.track("pd_send_cli_event_submitted", properties={
+            "event_type": args.event_type,
+            "severity": args.severity,
+            "has_incident_key": bool(args.incident_key),
+            "has_custom_details": bool(args.fields),
+            "custom_details_count": len(custom_details),
+            "base_url": BASE_URL,
+            "cert_verify_skipped": not VERIFY_CERT,
+        })
+    except Exception:
+        pass
+
     if not args.quiet:
         print(r.text)
 
