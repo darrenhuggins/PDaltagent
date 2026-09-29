@@ -3,6 +3,7 @@
 from pdaltagent.tasks import send_to_pd
 from pdaltagent.scrubber import scrub
 import pdaltagent.pd as pd
+import pdaltagent.pendo_track as pendo_track
 import os
 import json
 
@@ -21,6 +22,17 @@ def enqueue_integration(routing_key):
 		body = json.loads(scrub(json.dumps(body)))
 
 	send_to_pd.delay(routing_key, body, destination_type="v1")
+
+	# Pendo Track Event: event_ingested_v1
+	try:
+		pendo_track.track("event_ingested_v1", {
+			"destination_type": "v1",
+			"pii_scrubbed": str(SCRUB),
+			"routing_key_type": "rules_engine" if routing_key.startswith("R") else "classic",
+		})
+	except Exception:
+		pass
+
 	return "Message enqueued\n"
 
 @app.route('/x-ere/<routing_key>', methods=['POST'])
@@ -33,6 +45,17 @@ def enqueue_x_ere(routing_key):
 		body = json.loads(scrub(json.dumps(body)))
 
 	send_to_pd.delay(routing_key, body, destination_type="x-ere")
+
+	# Pendo Track Event: event_ingested_routing
+	try:
+		pendo_track.track("event_ingested_routing", {
+			"destination_type": "x-ere",
+			"pii_scrubbed": str(SCRUB),
+			"routing_key_type": "rules_engine" if routing_key.startswith("R") else "classic",
+		})
+	except Exception:
+		pass
+
 	return "Message enqueued\n"
 
 @app.route('/v2/enqueue', methods=['POST'])
@@ -56,4 +79,18 @@ def enqueue_v2():
 		body = json.loads(scrub(json.dumps(body)))
 
 	send_to_pd.delay(routing_key, body, destination_type="v2")
+
+	# Pendo Track Event: event_ingested_v2
+	try:
+		pendo_track.track("event_ingested_v2", {
+			"event_action": body.get("event_action", ""),
+			"severity": body.get("payload", {}).get("severity", ""),
+			"routing_key_type": "rules_engine" if routing_key.startswith("R") else "classic",
+			"pii_scrubbed": str(SCRUB),
+			"has_dedup_key": str(bool(body.get("dedup_key"))),
+			"payload_source": body.get("payload", {}).get("source", ""),
+		})
+	except Exception:
+		pass
+
 	return "Message enqueued\n"
